@@ -15,9 +15,19 @@ load_dotenv()
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Add apps directory to Python path
+# Add apps directory to Python path for both normal and test runs
 APPS_DIR = os.path.join(BASE_DIR, 'career_architect', 'apps')
 sys.path.insert(0, APPS_DIR)
+
+# FIX FOR TESTS: Add apps directory to Python path when running tests
+if 'test' in sys.argv:
+    # Ensure apps directory is in path for tests
+    if APPS_DIR not in sys.path:
+        sys.path.insert(0, APPS_DIR)
+    # Also add the parent directory for proper imports
+    PARENT_DIR = os.path.dirname(BASE_DIR)
+    if PARENT_DIR not in sys.path:
+        sys.path.insert(0, PARENT_DIR)
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-default-key-change-in-production')
@@ -36,14 +46,12 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     
-    # Third party apps
     'rest_framework',
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     'django_filters',
     
-    # Local apps
     'users',
     'roadmap',
     'ai_services',
@@ -101,7 +109,7 @@ else:
             'PASSWORD': os.environ.get('DB_PASSWORD', 'postgres'),
             'HOST': os.environ.get('DB_HOST', 'localhost'),
             'PORT': os.environ.get('DB_PORT', '5432'),
-            'ATOMIC_REQUESTS': True,  # Add this line
+            'ATOMIC_REQUESTS': True,
         }
     }
 

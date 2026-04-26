@@ -16,37 +16,49 @@ from .serializers import (
     UserExperienceSerializer, ResumeSerializer, CareerGoalSerializer,
     ChangePasswordSerializer
 )
-from ai_services.gemini_client import GeminiClient
-from ai_services.prompt_templates import get_resume_analysis_prompt
+from career_architect.apps.ai_services.gemini_client import GeminiClient
+from career_architect.apps.ai_services.prompt_templates import get_resume_analysis_prompt
 import os
-import mimetypes
 import traceback
 import logging
 import time
+import re
+
+# For PDF text extraction
+try:
+    import PyPDF2
+    HAS_PYPDF2 = True
+except ImportError:
+    HAS_PYPDF2 = False
+    print("Warning: PyPDF2 not installed. PDF text extraction will fail.")
+
+# For DOCX text extraction
+try:
+    import docx
+    HAS_DOCX = True
+except ImportError:
+    HAS_DOCX = False
+    print("Warning: python-docx not installed. DOCX text extraction will fail.")
 
 logger = logging.getLogger(__name__)
 gemini_client = GeminiClient()
 
 
 class UserViewSet(viewsets.ModelViewSet):
-    """ViewSet for User model"""
     queryset = User.objects.all()
     serializer_class = UserSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        """Filter to only return the current user"""
         return User.objects.filter(id=self.request.user.id)
 
     @action(detail=False, methods=['get'])
     def profile(self, request):
-        """Get full user profile with related data"""
         serializer = UserProfileSerializer(request.user, context={'request': request})
         return Response(serializer.data)
 
     @action(detail=False, methods=['put', 'patch'])
     def update_profile(self, request):
-        """Update user profile"""
         serializer = UserSerializer(request.user, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
@@ -55,7 +67,6 @@ class UserViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def change_password(self, request):
-        """Change user password"""
         serializer = ChangePasswordSerializer(data=request.data)
         if serializer.is_valid():
             user = request.user
@@ -71,25 +82,21 @@ class UserViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['delete'])
     def delete_account(self, request):
-        """Delete user account"""
         user = request.user
         user.delete()
         return Response({'message': 'Account deleted successfully'}, status=status.HTTP_204_NO_CONTENT)
 
 
 class AuthViewSet(viewsets.ViewSet):
-    """ViewSet for authentication"""
     permission_classes = [permissions.AllowAny]
 
     @action(detail=False, methods=['post'])
     def register(self, request):
-        """Register a new user"""
         logger.info("="*50)
         logger.info("REGISTER ENDPOINT CALLED")
         logger.info(f"Request data: {request.data}")
         
         try:
-            # Check if user already exists
             email = request.data.get('email')
             if email and User.objects.filter(email=email).exists():
                 return Response(
@@ -122,7 +129,6 @@ class AuthViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['post'])
     def login(self, request):
-        """Login user"""
         serializer = LoginSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             user = serializer.validated_data['user']
@@ -136,7 +142,6 @@ class AuthViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['post'], permission_classes=[permissions.IsAuthenticated])
     def logout(self, request):
-        """Logout user - blacklist refresh token"""
         try:
             refresh_token = request.data.get('refresh')
             if refresh_token:
@@ -148,7 +153,6 @@ class AuthViewSet(viewsets.ViewSet):
 
 
 class UserSkillViewSet(viewsets.ModelViewSet):
-    """ViewSet for UserSkill model"""
     serializer_class = UserSkillSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -160,7 +164,6 @@ class UserSkillViewSet(viewsets.ModelViewSet):
 
 
 class UserEducationViewSet(viewsets.ModelViewSet):
-    """ViewSet for UserEducation model"""
     serializer_class = UserEducationSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -172,7 +175,6 @@ class UserEducationViewSet(viewsets.ModelViewSet):
 
 
 class UserExperienceViewSet(viewsets.ModelViewSet):
-    """ViewSet for UserExperience model"""
     serializer_class = UserExperienceSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -183,8 +185,35 @@ class UserExperienceViewSet(viewsets.ModelViewSet):
         serializer.save(user=self.request.user)
 
 
+def extract_text_from_pdf(file_path):
+    text = ""
+    try:
+        with open(file_path, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            for page in pdf_reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+    except Exception as e:
+        logger.error(f"PDF extraction error: {str(e)}")
+        raise Exception(f"Failed to extract text from PDF: {str(e)}")
+    return text
+
+
+def extract_text_from_docx(file_path):
+    text = ""
+    try:
+        doc = docx.Document(file_path)
+        for paragraph in doc.paragraphs:
+            if paragraph.text:
+                text += paragraph.text + "\n"
+    except Exception as e:
+        logger.error(f"DOCX extraction error: {str(e)}")
+        raise Exception(f"Failed to extract text from DOCX: {str(e)}")
+    return text
+
+
 class ResumeViewSet(viewsets.ModelViewSet):
-    """ViewSet for Resume model - NO MOCK DATA, NO FALLBACKS"""
     serializer_class = ResumeSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -192,7 +221,6 @@ class ResumeViewSet(viewsets.ModelViewSet):
         return Resume.objects.filter(user=self.request.user)
 
     def create(self, request, *args, **kwargs):
-        """Override create to handle file upload properly"""
         try:
             file = request.FILES.get('file')
             if not file:
@@ -201,7 +229,6 @@ class ResumeViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Validate file size (10MB max)
             max_size = 10 * 1024 * 1024
             if file.size > max_size:
                 return Response(
@@ -209,7 +236,6 @@ class ResumeViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Validate file type
             content_type = file.content_type
             allowed_types = [
                 'application/pdf',
@@ -222,16 +248,13 @@ class ResumeViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Handle is_primary
             is_primary = request.data.get('is_primary', 'false').lower() == 'true'
 
             logger.info(f"Uploading resume: {file.name}, size: {file.size}, type: {content_type}, is_primary: {is_primary}")
 
-            # If this is primary, unset other primaries
             if is_primary:
                 Resume.objects.filter(user=request.user, is_primary=True).update(is_primary=False)
 
-            # Create resume
             resume = Resume.objects.create(
                 user=request.user,
                 file=file,
@@ -254,10 +277,8 @@ class ResumeViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def set_primary(self, request, pk=None):
-        """Set a resume as primary"""
         try:
             resume = self.get_object()
-            # Unset other primaries
             Resume.objects.filter(user=request.user, is_primary=True).exclude(id=resume.id).update(is_primary=False)
             resume.is_primary = True
             resume.save()
@@ -271,33 +292,52 @@ class ResumeViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def analyze(self, request, pk=None):
-        """Trigger AI analysis for a resume - REAL GEMINI API CALL, NO MOCK DATA"""
+        """Trigger AI analysis for a resume - IMPROVED SKILL EXTRACTION"""
         try:
             resume = self.get_object()
             
-            # Check if we have a file to analyze
             if not resume.file:
                 return Response(
                     {'error': 'No file to analyze'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            # Get the target role from request if provided
             target_role = request.data.get('target_role', '')
             
-            # Extract text from the file (you'll need a PDF/text extraction library)
-            # For now, we'll use a placeholder - in production, use PyPDF2, textract, etc.
-            resume_text = f"Resume filename: {resume.original_filename}\n"
-            resume_text += f"Uploaded by: {request.user.email}\n"
-            resume_text += f"File type: {resume.file_type}\n"
-            resume_text += f"File size: {resume.file_size} bytes\n"
+            file_path = resume.file.path
+            resume_text = ""
+            file_ext = os.path.splitext(resume.original_filename)[1].lower()
             
-            # Add note about text extraction - in production, implement actual text extraction
-            resume_text += "\n[Note: In production, this would contain the extracted text from the PDF/DOCX file]"
+            if file_ext == '.pdf':
+                if not HAS_PYPDF2:
+                    return Response(
+                        {'error': 'PDF extraction library not installed. Please install PyPDF2.'},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
+                resume_text = extract_text_from_pdf(file_path)
+                
+            elif file_ext in ['.docx', '.doc']:
+                if not HAS_DOCX:
+                    return Response(
+                        {'error': 'DOCX extraction library not installed. Please install python-docx.'},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
+                resume_text = extract_text_from_docx(file_path)
+            else:
+                return Response(
+                    {'error': f'Unsupported file type: {file_ext}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             
-            # Call Gemini API for analysis
+            if not resume_text or len(resume_text.strip()) < 50:
+                return Response(
+                    {'error': 'Could not extract sufficient text from the resume.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            logger.info(f"Extracted {len(resume_text)} characters from resume")
+            
             start_time = time.time()
-            
             prompt = get_resume_analysis_prompt(resume_text, target_role)
             response = gemini_client.generate_content(prompt)
             
@@ -306,70 +346,97 @@ class ResumeViewSet(viewsets.ModelViewSet):
             
             analysis_text = response['text']
             
-            # Parse the analysis text to extract structured data
-            # This is a simple parser - you can enhance it based on your prompt format
+            # Define common technical skills for extraction
+            COMMON_SKILLS = [
+                'Python', 'JavaScript', 'TypeScript', 'Java', 'C++', 'C#', 'Go', 'Rust',
+                'React', 'Angular', 'Vue', 'Node.js', 'Express', 'Django', 'Flask', 'Spring',
+                'AWS', 'Azure', 'GCP', 'Docker', 'Kubernetes', 'Terraform', 'Jenkins',
+                'SQL', 'PostgreSQL', 'MySQL', 'MongoDB', 'Redis', 'Elasticsearch',
+                'TensorFlow', 'PyTorch', 'Scikit-learn', 'Pandas', 'NumPy', 'Jupyter',
+                'Git', 'GitHub', 'GitLab', 'CI/CD', 'DevOps', 'Agile', 'Scrum', 'Kanban',
+                'REST API', 'GraphQL', 'gRPC', 'Microservices', 'Serverless',
+                'HTML', 'CSS', 'Tailwind', 'Bootstrap', 'Material-UI',
+                'Leadership', 'Project Management', 'Communication', 'Teamwork'
+            ]
+            
+            # Parse analysis text
             analysis_result = {
                 'text': analysis_text,
-                'ats_score': None,
-                'impact_score': None,
-                'format_score': None,
+                'ats_score': 0,
                 'strengths': [],
                 'improvements': [],
                 'keywords': {'matched': [], 'missing': []},
                 'suggestions': []
             }
             
-            # Try to extract scores if present in format like "ATS Score: 85"
-            import re
-            ats_match = re.search(r'ATS\s*Score\s*[:\-]?\s*(\d+)', analysis_text, re.IGNORECASE)
-            if ats_match:
-                analysis_result['ats_score'] = int(ats_match.group(1))
+            # Extract overall score
+            score_match = re.search(r'OVERALL SCORE:\s*(\d+)', analysis_text, re.IGNORECASE)
+            if score_match:
+                analysis_result['ats_score'] = int(score_match.group(1))
+            else:
+                score_match = re.search(r'(\d+)\s*/\s*100', analysis_text)
+                if score_match:
+                    analysis_result['ats_score'] = int(score_match.group(1))
             
-            impact_match = re.search(r'Impact\s*Score\s*[:\-]?\s*(\d+)', analysis_text, re.IGNORECASE)
-            if impact_match:
-                analysis_result['impact_score'] = int(impact_match.group(1))
-            
-            format_match = re.search(r'Format\s*Score\s*[:\-]?\s*(\d+)', analysis_text, re.IGNORECASE)
-            if format_match:
-                analysis_result['format_score'] = int(format_match.group(1))
-            
-            # Extract bullet points for strengths (lines starting with • or - after "STRENGTHS" section)
-            strengths_section = re.search(r'STRENGTHS.*?\n(.*?)(?=\n\n|\Z)', analysis_text, re.DOTALL | re.IGNORECASE)
+            # Extract strengths
+            strengths_section = re.search(r'STRENGTHS\s*\n-+\s*\n(.*?)(?=\n\n|\n[A-Z]|\Z)', analysis_text, re.DOTALL | re.IGNORECASE)
             if strengths_section:
                 strength_lines = strengths_section.group(1).split('\n')
                 for line in strength_lines:
-                    if line.strip().startswith(('•', '-', '*')) and len(line.strip()) > 2:
-                        analysis_result['strengths'].append(line.strip()[1:].strip())
+                    cleaned = re.sub(r'^[•\-*\s]+', '', line.strip())
+                    if cleaned and len(cleaned) > 10 and len(cleaned) < 200:
+                        analysis_result['strengths'].append(cleaned)
             
-            # Extract bullet points for improvements
-            improvements_section = re.search(r'IMPROVEMENTS.*?\n(.*?)(?=\n\n|\Z)', analysis_text, re.DOTALL | re.IGNORECASE)
+            # Extract improvements
+            improvements_section = re.search(r'AREAS FOR IMPROVEMENT\s*\n-+\s*\n(.*?)(?=\n\n|\n[A-Z]|\Z)', analysis_text, re.DOTALL | re.IGNORECASE)
             if improvements_section:
                 improvement_lines = improvements_section.group(1).split('\n')
                 for line in improvement_lines:
-                    if line.strip().startswith(('•', '-', '*')) and len(line.strip()) > 2:
-                        analysis_result['improvements'].append(line.strip()[1:].strip())
+                    cleaned = re.sub(r'^[•\-*\s]+', '', line.strip())
+                    if cleaned and len(cleaned) > 10 and len(cleaned) < 200:
+                        analysis_result['improvements'].append(cleaned)
             
-            # Extract suggestions
-            suggestions_section = re.search(r'SUGGESTIONS.*?\n(.*?)(?=\n\n|\Z)', analysis_text, re.DOTALL | re.IGNORECASE)
-            if suggestions_section:
-                suggestion_lines = suggestions_section.group(1).split('\n')
+            # EXTRACT MATCHED SKILLS - Look for skills in the entire analysis text
+            matched_skills = []
+            analysis_lower = analysis_text.lower()
+            
+            for skill in COMMON_SKILLS:
+                skill_lower = skill.lower()
+                # Check if skill appears in analysis text
+                if skill_lower in analysis_lower:
+                    matched_skills.append(skill)
+            
+            # Also try to extract from "Strong Keywords Present" section
+            matched_section = re.search(r'Strong Keywords Present[:\s]*\n?(.*?)(?=\n\n|\nMissing|\Z)', analysis_text, re.DOTALL | re.IGNORECASE)
+            if matched_section:
+                section_text = matched_section.group(1)
+                for skill in COMMON_SKILLS:
+                    if skill.lower() in section_text.lower() and skill not in matched_skills:
+                        matched_skills.append(skill)
+            
+            # Remove duplicates and limit to 15
+            analysis_result['keywords']['matched'] = list(set(matched_skills))[:15]
+            
+            # Extract suggestions from Quick Wins
+            quick_wins_section = re.search(r'QUICK WINS.*?\n(.*?)(?=\n\n|\nLONG-TERM|\Z)', analysis_text, re.DOTALL | re.IGNORECASE)
+            if quick_wins_section:
+                suggestion_lines = quick_wins_section.group(1).split('\n')
                 for line in suggestion_lines:
-                    if line.strip().startswith(('•', '-', '*', '1.', '2.')) and len(line.strip()) > 2:
-                        # Remove numbering/bullets
-                        cleaned = re.sub(r'^[\d\.\s•\-*]+\s*', '', line.strip())
-                        if cleaned:
-                            analysis_result['suggestions'].append(cleaned)
+                    cleaned = re.sub(r'^[\d\.\s•\-*]+\s*', '', line.strip())
+                    if cleaned and len(cleaned) > 15:
+                        analysis_result['suggestions'].append(cleaned)
             
-            # Update resume with analysis results
+            # Update resume
             resume.analyzed = True
-            resume.ats_score = analysis_result['ats_score'] or 0
-            resume.match_score = 0  # Will be calculated when compared to jobs
+            resume.ats_score = analysis_result['ats_score']
+            resume.match_score = 0
             resume.last_analyzed = timezone.now()
             resume.parsed_content = analysis_result
             resume.save()
             
             processing_time = int((time.time() - start_time) * 1000)
             logger.info(f"Resume {resume.id} analyzed successfully in {processing_time}ms")
+            logger.info(f"Extracted matched skills: {analysis_result['keywords']['matched']}")
             
             return Response(analysis_result, status=status.HTTP_200_OK)
             
@@ -383,18 +450,14 @@ class ResumeViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def analysis(self, request, pk=None):
-        """Get existing analysis for a resume"""
         try:
             resume = self.get_object()
-            
             if not resume.analyzed or not resume.parsed_content:
                 return Response(
                     {'message': 'Analysis not available'},
                     status=status.HTTP_404_NOT_FOUND
                 )
-            
             return Response(resume.parsed_content, status=status.HTTP_200_OK)
-            
         except Exception as e:
             logger.error(f"Error getting resume analysis: {str(e)}")
             return Response(
@@ -404,7 +467,6 @@ class ResumeViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def download(self, request, pk=None):
-        """Download the resume file"""
         try:
             resume = self.get_object()
             if not resume.file:
@@ -412,15 +474,12 @@ class ResumeViewSet(viewsets.ModelViewSet):
                     {'error': 'File not found'},
                     status=status.HTTP_404_NOT_FOUND
                 )
-            
-            # Return file response
             from django.http import FileResponse
             return FileResponse(
                 resume.file.open('rb'),
                 as_attachment=True,
                 filename=resume.original_filename
             )
-            
         except Exception as e:
             logger.error(f"Error downloading resume: {str(e)}")
             return Response(
@@ -429,10 +488,8 @@ class ResumeViewSet(viewsets.ModelViewSet):
             )
 
     def destroy(self, request, *args, **kwargs):
-        """Override destroy to delete the file from storage"""
         try:
             resume = self.get_object()
-            # Delete the file from storage
             if resume.file:
                 if default_storage.exists(resume.file.name):
                     default_storage.delete(resume.file.name)
@@ -447,12 +504,10 @@ class ResumeViewSet(viewsets.ModelViewSet):
 
 
 class CareerGoalViewSet(viewsets.ModelViewSet):
-    """ViewSet for CareerGoal model"""
     serializer_class = CareerGoalSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        # Return ALL goals for the user, not just active ones
         return CareerGoal.objects.filter(user=self.request.user)
 
     def perform_create(self, serializer):
@@ -460,7 +515,6 @@ class CareerGoalViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def archive(self, request, pk=None):
-        """Archive a career goal"""
         goal = self.get_object()
         goal.is_active = False
         goal.save()
@@ -468,7 +522,6 @@ class CareerGoalViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def complete(self, request, pk=None):
-        """Mark a goal as completed"""
         goal = self.get_object()
         goal.is_completed = True
         goal.completed_date = timezone.now()

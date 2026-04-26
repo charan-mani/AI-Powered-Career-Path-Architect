@@ -21,7 +21,7 @@ urlpatterns = [
     path('api/', include('users.urls')),
     path('api/roadmap/', include('roadmap.urls')),
     path('api/ai/', include('ai_services.urls')),
-    path('api/jobs/', include('jobs.urls')),  # ADD THIS LINE
+    path('api/jobs/', include('jobs.urls')),
 ]
 
 # Serve media files in development
